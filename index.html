@@ -1,0 +1,544 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>像素房间开关</title>
+<style>
+  html,body{height:100%;margin:0}
+  body{
+    display:flex;align-items:center;justify-content:center;overflow:hidden;
+    background:radial-gradient(120% 90% at 50% 35%,#f6f7f9 0%,#eceef1 55%,#e3e6ea 100%);
+    -webkit-tap-highlight-color:transparent;
+  }
+  .wrap{position:relative}
+  .capsule{
+    position:absolute;left:0;top:0;transform-origin:0 0;
+    width:720px;height:138px;box-sizing:border-box;padding:9px;border-radius:69px;
+    background:linear-gradient(#ffffff,#f3f4f7);
+    box-shadow:
+      0 26px 50px -12px rgba(70,80,110,.30),
+      0 8px 16px rgba(70,80,110,.16),
+      0 1px 2px rgba(70,80,110,.25),
+      inset 0 2px 1px #fff,
+      inset 0 -4px 6px rgba(120,130,160,.22);
+    cursor:grab;touch-action:none;user-select:none;-webkit-user-select:none;outline:none;
+  }
+  .capsule:active{cursor:grabbing}
+  .capsule:focus-visible{box-shadow:0 0 0 4px rgba(155,108,240,.45),0 26px 50px -12px rgba(70,80,110,.30),0 8px 16px rgba(70,80,110,.16)}
+  .inner{width:702px;height:120px;border-radius:60px;overflow:hidden;background:#1b1d45}
+  canvas{display:block;width:702px;height:120px;image-rendering:pixelated}
+</style>
+</head>
+<body>
+<div class="wrap" id="wrap">
+  <div class="capsule" id="cap" role="slider" tabindex="0" aria-label="房间灯光" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+    <div class="inner"><canvas id="c"></canvas></div>
+  </div>
+</div>
+<script>
+(()=>{
+'use strict';
+
+/* ============================================================
+   可调参数 ①：房间配色（都是白天的本色，夜晚由 LIGHT 统一染色）
+   ============================================================ */
+const C={
+  wall:0xf2dcc8, wallStripe:0xecd0b8, base:0xb58463, baseTop:0xd9a882,
+  floor:0xc8915c, floorLine:0xb07a48,
+  wood:0x9a6748, woodDark:0x6e4630, woodLight:0xc08a62,
+  tree:0x2f9e5b, treeDark:0x1f7a45, treeLight:0x58c67c, pot:0xb5523f, potRim:0xd97058,
+  bulbs:[0xff4d6d,0xffd23f,0x4dd2ff,0x7dff7a,0xff8ad8],
+  speaker:0x3a3344, speakerFace:0x4c4459, cone:0x1e1a26, coneMid:0x6f6688,
+  books:[0xe05a5a,0xf2b84b,0x5aa9e6,0x7bc86c,0xb48be0,0xf28f6b,0x4fc4b8,0xf2e3c6],
+  frame:0xfff7ec, sill:0xe6d6c2, curtain:0xe58fa3, curtainDark:0xc96d86,
+  skyNight:[0x0b1037,0x2b2f70], skyDawn:[0x6f7fd0,0xffb38a], skyDay:[0x62bbff,0xd6f1ff],
+  moon:0xfff3c4, sun:0xffe680,
+  sheet:0xffffff, pillowShade:0xe1d9ea, blanket:0x6fa8dc, blanketDark:0x4f86c0, blanketDot:0xffe98a,
+  rug:0xd9667a, rugLight:0xf3a6b3, rugEdge:0xb84c62,
+  lampOff:0xcdbfae, lampOn:0xfff3b0, lampStem:0x8a7a6a,
+  door:0xc98f5e, doorPanel:0xb57b4b, doorFrame:0x7a4e34, knob:0xffd23f
+};
+/* 女孩调色板：h/H/l 头发，s 皮肤，d/D 裙子，r 发绳 */
+const PAL={h:0x9b6cf0,H:0x7447c9,l:0xc9a6ff,s:0xffdcbc,d:0xff8fb1,D:0xe0668c,r:0xffd84d};
+const GIRL_EYE=0x3b2a5a, GIRL_BLUSH=0xff9aa2, GIRL_MOUTH=0xd95f78, GIRL_SHOE=0x5a3a6a;
+
+/* 可调参数 ②：光照。amb 是环境光三段（深夜/过渡/白天）的 RGB 倍率 */
+const LIGHT={
+  ambNight:[0.25,0.26,0.56], ambMid:[0.74,0.62,0.66], ambDay:[1.03,1.00,0.94],
+  lamp:[1.0,0.68,0.30], moon:[0.24,0.32,0.62], sun:[0.24,0.19,0.06]
+};
+
+/* ============================================================
+   可调参数 ③：女孩的动作时间线。d = 滑块位置 0(深夜)~1(白天)
+   返回每一帧的姿势；改这里的区间就能改她何时起床/走路/挥手
+   ============================================================ */
+function girlPose(d,t){
+  const sit=sm(0.16,0.36,d);            // 坐起
+  const out=sm(0.38,0.54,d);            // 跳下床
+  const walk=clamp((d-0.54)/0.32,0,1);  // 走到地毯右侧
+  const wave=sm(0.86,0.93,d);           // 挥手
+  const p={inBed:out<=0,x:120,y:15-6*sit,eyes:d>0.24,arms:0,legs:-1,smile:d>0.5,sleep:d<0.2,wavef:0,hd:0,sway:0,shadow:0};
+  if(d>0.27&&d<0.37&&p.inBed)p.arms=1;  // 伸懒腰
+  if(!p.inBed){
+    p.x=Math.round(120+14*out+46*walk);
+    p.y=Math.round(9+10*out-Math.sin(Math.PI*out)*5);
+    p.legs=out>0.15?0:-1; p.shadow=out;
+    if(walk>0&&walk<1){const ph=Math.floor(walk*46/2.2)%4;p.legs=ph;if(ph&1)p.y-=1;}
+    if(wave>0){p.arms=2;p.wavef=Math.floor(t*5)&1;}
+  }
+  // 待机：眨眼、头部轻点、双马尾晃动
+  const bt=t%3.7; if(p.eyes&&(bt<0.13||(bt>0.32&&bt<0.42)))p.eyes=false;
+  p.hd=p.sleep?(Math.sin(t*1.3)>0.2?1:0):(Math.sin(t*2.1)>0.72?1:0);
+  if(!p.sleep){const sw=Math.sin(t*1.7);p.sway=sw>0.6?1:sw<-0.6?-1:0;}
+  return p;
+}
+
+/* ---------- 基础工具 ---------- */
+const W=234,H=40,S=3,CW=702,CH=120,KR=55,X0=60,X1=642,N=W*H,TAU=Math.PI*2;
+const clamp=(v,a,b)=>v<a?a:v>b?b:v;
+const sm=(a,b,v)=>{v=clamp((v-a)/(b-a),0,1);return v*v*(3-2*v);};
+function mix(a,b,t){t=clamp(t,0,1);const ar=a>>16,ag=a>>8&255,ab=a&255;
+  return ((ar+((b>>16)-ar)*t)<<16)|((ag+((b>>8&255)-ag)*t)<<8)|((ab+((b&255)-ab)*t)|0);}
+const mix3=(a,b,c,t)=>t<0.5?mix(a,b,t*2):mix(b,c,t*2-1);
+
+const cv=document.getElementById('c'),ctx=cv.getContext('2d');
+const cap=document.getElementById('cap'),wrap=document.getElementById('wrap');
+const roomCv=document.createElement('canvas');roomCv.width=W;roomCv.height=H;
+const rctx=roomCv.getContext('2d');
+const img=rctx.createImageData(W,H),px=img.data,em=new Uint8Array(N);
+for(let i=3;i<px.length;i+=4)px[i]=255;
+
+let kx0=0,ky0=0,kx1=W,ky1=H;                       // 裁剪框
+const clip=(x,y,w,h)=>{kx0=x;ky0=y;kx1=x+w;ky1=y+h;};
+const unclip=()=>{kx0=0;ky0=0;kx1=W;ky1=H;};
+/* 画矩形：c 颜色，e 自发光 0~255（发光像素不受夜晚染色影响） */
+function R(x,y,w,h,c,e){
+  x=Math.round(x);y=Math.round(y);
+  const x0=Math.max(x,kx0),y0=Math.max(y,ky0),x1=Math.min(x+w,kx1),y1=Math.min(y+h,ky1);
+  const r=c>>16&255,g=c>>8&255,b=c&255;e=e|0;
+  for(let yy=y0;yy<y1;yy++){let i=yy*W+x0;for(let xx=x0;xx<x1;xx++,i++){const o=i<<2;px[o]=r;px[o+1]=g;px[o+2]=b;em[i]=e;}}
+}
+function B(x,y,w,h,c,a){                            // 半透明叠加
+  x=Math.round(x);y=Math.round(y);
+  const x0=Math.max(x,kx0),y0=Math.max(y,ky0),x1=Math.min(x+w,kx1),y1=Math.min(y+h,ky1);
+  const r=c>>16&255,g=c>>8&255,b=c&255;
+  for(let yy=y0;yy<y1;yy++){let i=yy*W+x0;for(let xx=x0;xx<x1;xx++,i++){const o=i<<2;px[o]+=(r-px[o])*a;px[o+1]+=(g-px[o+1])*a;px[o+2]+=(b-px[o+2])*a;}}
+}
+function G(x,y,c,a){                                // 加色光晕（光照之后）
+  x=Math.round(x);y=Math.round(y);if(x<0||y<0||x>=W||y>=H)return;
+  const o=(y*W+x)<<2;px[o]+=(c>>16&255)*a;px[o+1]+=(c>>8&255)*a;px[o+2]+=(c&255)*a;
+}
+let glows=[];
+
+/* ---------- 光照贴图（预计算） ---------- */
+const lampMap=new Float32Array(N),moonMap=new Float32Array(N),treeMap=new Float32Array(N);
+for(let y=0;y<H;y++)for(let x=0;x<W;x++){
+  const i=y*W+x;
+  lampMap[i]=Math.pow(Math.max(0,1-Math.hypot(x-171.5,(y-16)*1.25)/46),2);
+  treeMap[i]=Math.pow(Math.max(0,1-Math.hypot(x-18,y-17)/26),2);
+  let m=0;
+  if(y>=31){const xs=x-(y-31)*1.6-4;if((xs>=83&&xs<96)||(xs>=98&&xs<111))m=1;}
+  const dx=Math.max(83-x,0,x-110),dy=Math.max(6-y,0,y-20);
+  moonMap[i]=Math.max(m,0.5*Math.exp(-Math.hypot(dx,dy)/5));
+}
+
+/* ---------- 女孩像素图（14 列，头 0~9 行，身体 10~15 行） ---------- */
+const GIRL=[
+  ".....hhhh.....",
+  "...hhhhhhhh...",
+  "..hhllhhhhhh..",
+  ".rhlhhhhhhhhr.",
+  "hhHhhhhhhhhHhh",
+  "hhHsshsshssHhh",
+  "hhHssssssssHhh",
+  "hh.ssssssss.hh",
+  "hh.ssssssss.hh",
+  ".h..ssssss..h.",
+  ".h...dddd...h.",
+  "....dddddd....",
+  "....dddddd....",
+  "....dddddd....",
+  "...dddddddd...",
+  "...DDDDDDDD..."
+];
+function girlRows(gx,gy,r0,r1,sway,hd){
+  for(let r=r0;r<r1;r++){const row=GIRL[r];
+    for(let c=0;c<row.length;c++){const ch=row[c];if(ch==='.')continue;
+      let xx=gx+c;if(r>=5&&(c<2||c>11))xx+=sway;
+      R(xx,gy+r+(r<10?hd:0),1,1,PAL[ch]);}}
+}
+function drawGirl(p){
+  const gx=p.x,gy=Math.round(p.y),sk=PAL.s;
+  if(p.shadow>0)B(gx+2,38,10,1,0x3a2030,0.22*p.shadow);
+  if(p.legs>=0){
+    const L=p.legs===1,Rt=p.legs===3;
+    R(gx+5,gy+16,1,L?1:2,sk);R(gx+4,gy+(L?17:18),2,1,GIRL_SHOE);
+    R(gx+8,gy+16,1,Rt?1:2,sk);R(gx+8,gy+(Rt?17:18),2,1,GIRL_SHOE);
+  }
+  girlRows(gx,gy,10,16,p.sway,0);
+  girlRows(gx,gy,0,10,p.sway,p.hd);
+  const ey=gy+p.hd;
+  if(p.eyes){R(gx+4,ey+6,1,2,GIRL_EYE);R(gx+9,ey+6,1,2,GIRL_EYE);}
+  else{R(gx+4,ey+7,1,1,GIRL_EYE);R(gx+9,ey+7,1,1,GIRL_EYE);}
+  R(gx+3,ey+8,1,1,GIRL_BLUSH);R(gx+10,ey+8,1,1,GIRL_BLUSH);
+  if(p.smile)R(gx+6,ey+8,2,1,GIRL_MOUTH);else R(gx+7,ey+8,1,1,mix(sk,GIRL_MOUTH,0.6));
+  if(p.arms===0){R(gx+3,gy+11,1,3,sk);R(gx+10,gy+11,1,3,sk);}
+  else if(p.arms===1){R(gx+3,gy+11,1,1,sk);R(gx+2,gy+7,1,4,sk);R(gx+10,gy+11,1,1,sk);R(gx+11,gy+7,1,4,sk);}
+  else{R(gx+3,gy+11,1,3,sk);R(gx+10,gy+11,1,1,sk);R(gx+11,gy+9,1,2,sk);R(gx+(p.wavef?12:11),gy+7,1,2,sk);}
+}
+
+/* ---------- 房间各部分 ---------- */
+function drawWall(){
+  R(0,0,W,31,C.wall);
+  for(let x=5;x<W;x+=8)R(x,0,1,29,C.wallStripe);
+  R(0,29,W,2,C.base);R(0,29,W,1,C.baseTop);
+  R(0,31,W,9,C.floor);R(0,31,W,1,mix(C.floor,0xffffff,0.18));
+  R(0,34,W,1,C.floorLine);R(0,37,W,1,C.floorLine);
+  for(let x=9;x<W;x+=23){R(x,32,1,2,C.floorLine);R(x+11,35,1,2,C.floorLine);R(x+4,38,1,2,C.floorLine);}
+}
+function drawFairy(t,d){
+  for(let x=38;x<=200;x++){
+    const y=1+Math.round(1.3*Math.pow(Math.sin((x-38)/18*Math.PI),2));
+    R(x,y,1,1,0x6b5a4a);
+    if((x-38)%9===4){const i=(x/9)|0,b=0.35+0.65*Math.pow(0.5+0.5*Math.sin(t*2.4+i*1.9),2);
+      const c=C.bulbs[i%5];R(x,y+1,1,1,mix(mix(c,0,0.55),c,b),200*b+40);
+      glows.push([x,y+2,c,0.18*b*(1-0.7*d)]);}
+  }
+}
+const TREE_BULBS=[[18,8],[16,11],[20,12],[15,15],[19,16],[22,18],[13,19],[20,20],[17,22],[13,23],[22,24],[10,26],[16,26],[25,26]];
+function drawTree(t,d){
+  const cx=18;
+  R(9,31,5,3,0x4d8fe0);R(11,31,1,3,0xffe14d);                 // 礼物
+  R(23,29,6,5,0xe0465e);R(25,29,2,5,0xffe14d);R(23,31,6,1,0xffe14d);
+  R(17,28,3,3,C.woodDark);R(15,30,7,4,C.pot);R(14,30,9,1,C.potRim);
+  for(let y=6;y<28;y++){
+    let h; if(y<13)h=1+(y-6)*0.5; else if(y<20)h=3+(y-13)*0.75; else h=5+(y-20)*0.9;
+    h=Math.floor(h);
+    R(cx-h,y,2*h+1,1,C.tree);
+    R(cx+Math.ceil(h*0.35),y,h-Math.ceil(h*0.35)+1,1,C.treeDark);
+    if(y===12||y===19||y===27)R(cx-h,y,2*h+1,1,C.treeDark);
+    else if(h>1)R(cx-h+1,y,1,1,C.treeLight);
+  }
+  const sp=0.7+0.3*Math.sin(t*4);
+  const sc=mix(0xc9a020,0xffe14d,sp);
+  R(cx,3,1,1,sc,255);R(cx-1,4,3,1,sc,255);R(cx,5,1,1,sc,255);
+  glows.push([cx,2,0xffe14d,0.3*sp],[cx-2,4,0xffe14d,0.3*sp],[cx+2,4,0xffe14d,0.3*sp]);
+  for(let i=0;i<TREE_BULBS.length;i++){
+    const [bx,by]=TREE_BULBS[i],c=C.bulbs[i%5];
+    const b=0.25+0.75*Math.pow(0.5+0.5*Math.sin(t*3.1+i*2.3),2);
+    R(bx,by,1,1,mix(mix(c,0,0.6),c,b),255*b);
+    const a=0.26*b*(1-0.75*d);
+    glows.push([bx-1,by,c,a],[bx+1,by,c,a],[bx,by-1,c,a],[bx,by+1,c,a]);
+  }
+}
+function drawSpeaker(t,d){
+  R(34,16,10,18,C.speaker);R(35,17,8,16,C.speakerFace);
+  R(38,19,2,2,C.cone);
+  R(37,24,4,6,C.cone);R(36,25,6,4,C.cone);
+  const beat=d>0.55&&Math.sin(t*9)>0;
+  if(beat)R(37,25,4,4,C.coneMid);else R(38,26,2,2,C.coneMid);
+  R(42,18,1,1,mix(0xff5050,0x66ff88,sm(0.5,0.6,d)),255);
+  const na=sm(0.55,0.7,d);
+  if(na>0)for(let i=0;i<2;i++){
+    const ph=(t*0.55+i*0.5)%1,nx=36+i*5+Math.round(Math.sin(t*2+i*3)*1.2),ny=13-ph*9,a=na*(1-ph);
+    B(nx+1,ny,1,3,0x6a4fb0,a);B(nx,ny+2,2,1,0x6a4fb0,a);B(nx+2,ny,1,1,0x6a4fb0,a);
+  }
+}
+const SHELF=[
+  [[2,6,0],[1,5,1],[2,7,2],[1,6,3],[2,5,4],[1,7,5],[2,6,6],[1,4,7],[2,7,0],[1,6,2]],
+  [[1,6,4],[2,7,5],[1,5,2],[2,6,1],[1,7,0],[2,5,6]],
+  [[2,7,3],[2,6,5],[1,7,7],[2,5,0],[1,6,4],[2,7,2],[1,5,1]]
+];
+function drawShelf(){
+  R(48,7,24,27,C.wood);R(48,7,24,1,C.woodLight);R(50,9,20,23,C.woodDark);
+  R(50,16,20,1,C.wood);R(50,24,20,1,C.wood);
+  for(let s=0;s<3;s++){let x=50;const fy=16+s*8;
+    for(const [w,h,c] of SHELF[s]){R(x,fy-h,w,h,C.books[c]);R(x,fy-h+1,w,1,mix(C.books[c],0xffffff,0.35));x+=w;}}
+  R(65,22,3,2,0xd9774f);R(66,19,1,3,C.tree);R(65,20,1,1,C.treeLight);R(67,19,1,2,C.treeLight);  // 小盆栽
+  R(64,30,5,1,C.books[1]);R(64,29,5,1,C.books[2]);R(65,28,4,1,C.books[0]);                     // 平放的书
+}
+const STARS=[[85,7],[89,10],[93,7],[100,10],[108,12],[86,13],[92,14],[107,7],[102,15]];
+function drawWindow(t,d){
+  R(81,4,32,19,C.frame);
+  clip(83,6,28,15);
+  for(let y=6;y<21;y++){const f=(y-6)/14;
+    R(83,y,28,1,mix3(mix(C.skyNight[0],C.skyNight[1],f),mix(C.skyDawn[0],C.skyDawn[1],f),mix(C.skyDay[0],C.skyDay[1],f),d),255);}
+  const sa=clamp(1-d*2.3,0,1);
+  if(sa>0)for(let i=0;i<STARS.length;i++){const tw=0.35+0.65*Math.pow(0.5+0.5*Math.sin(t*(1.6+i*0.37)+i*4.1),2);B(STARS[i][0],STARS[i][1],1,1,0xffffff,sa*tw);}
+  const mA=1-sm(0.25,0.6,d),mx=102,my=Math.round(8+d*16);
+  if(mA>0){B(mx+1,my,3,5,C.moon,mA);B(mx,my+1,5,3,C.moon,mA);B(mx+1,my+3,1,1,0xd9cc94,mA);B(mx+3,my+1,1,1,0xd9cc94,mA*0.7);
+    for(let a=0;a<12;a++)glows.push([mx+2+Math.round(Math.cos(a/12*TAU)*3.6),my+2+Math.round(Math.sin(a/12*TAU)*3.6),0x8090ff,0.16*mA,1]);}
+  const sA=sm(0.3,0.6,d),sx=87,sy=Math.round(21-sm(0.3,1,d)*13);
+  if(sA>0){B(sx+1,sy,3,5,C.sun,sA);B(sx,sy+1,5,3,C.sun,sA);
+    for(let a=0;a<8;a++)if(((t*1.5)|0)%2===a%2)B(sx+2+Math.round(Math.cos(a/8*TAU)*4),sy+2+Math.round(Math.sin(a/8*TAU)*4),1,1,0xfff6c0,sA*0.8);}
+  const hill=mix3(0x3a4590,0xf2c9c0,0xffffff,d),pine=mix3(0x16224e,0x5a6a80,0x3f8a6a,d);
+  for(let x=83;x<111;x++){const h=3+Math.round(1.5*Math.sin(x*0.35)+Math.sin(x*0.13+2));
+    if(x===91||x===106){const b=21-h;R(x,b-4,1,1,pine,255);R(x-1,b-3,3,2,pine,255);R(x-2,b-1,5,1,pine,255);}
+    R(x,21-h,1,h,hill,255);}
+  for(let i=0;i<16;i++){                                                     // 雪
+    const sp=2.5+(i*7%5)*0.8,fx=83+((i*37.7+Math.sin(t*0.8+i)*1.6+280)%28),fy=6+((t*sp+i*5.3)%15);
+    B(Math.floor(fx),Math.floor(fy),1,1,0xffffff,0.55+0.4*d);
+  }
+  unclip();
+  R(96,6,2,15,C.frame);R(83,13,28,1,C.frame);
+  R(79,22,36,2,C.sill);R(79,23,36,1,mix(C.sill,0,0.15));
+  R(78,3,38,1,C.woodDark);
+  R(79,4,4,18,C.curtain);R(111,4,4,18,C.curtain);R(80,4,1,18,C.curtainDark);R(113,4,1,18,C.curtainDark);
+  R(79,17,4,1,C.curtainDark);R(111,17,4,1,C.curtainDark);
+}
+const DOTS=[[124,28],[131,27],[138,29],[145,27],[152,28],[157,26],[128,30],[142,30],[149,30]];
+function drawBedBack(){
+  R(115,14,3,20,C.wood);R(115,14,3,1,C.woodLight);
+  R(118,25,43,6,0xf4ece2);
+  R(119,19,17,6,C.sheet);R(119,24,17,1,C.pillowShade);R(119,19,1,1,C.wall);R(135,19,1,1,C.wall);
+}
+function drawBedFront(t,d){
+  const mound=d<0.38?Math.round(2-1.4*sm(0.16,0.36,d)):0;
+  if(mound>0){R(135,24-mound,23,mound,C.blanket);
+    if(d<0.2&&Math.sin(t*1.3)>0.2)R(138,23-mound,17,1,C.blanket);}
+  R(118,24,43,2,C.sheet);R(118,26,43,6,C.blanket);R(118,31,43,1,C.blanketDark);
+  for(const [x,y] of DOTS)R(x,y,1,1,C.blanketDot);
+  R(116,32,46,2,C.wood);R(117,34,2,1,C.woodDark);R(159,34,2,1,C.woodDark);
+  R(160,21,3,13,C.wood);R(160,21,3,1,C.woodLight);
+}
+function drawZzz(t,d){
+  const zA=clamp(1-d/0.2,0,1);if(zA<=0)return;
+  for(let k=0;k<3;k++){const ph=(t*0.35+k/3)%1,zx=136+ph*10,zy=16-ph*11,a=zA*Math.sin(ph*Math.PI);
+    B(zx,zy,3,1,0xd6dcff,a);B(zx+1,zy+1,1,1,0xd6dcff,a);B(zx,zy+2,3,1,0xd6dcff,a);}
+}
+function drawRug(){
+  R(149,35,48,4,C.rug);R(150,34,46,1,C.rug);R(150,39,46,1,C.rugEdge);
+  R(152,36,42,1,C.rugLight);R(152,38,42,1,C.rugLight);
+  for(let x=151;x<196;x+=3)R(x,37,1,1,C.rugEdge);
+}
+function drawLamp(lampI){
+  R(165,24,12,10,C.wood);R(164,23,14,1,C.woodLight);R(166,26,10,3,C.woodDark);R(170,27,2,1,C.knob);
+  R(166,34,1,1,C.woodDark);R(175,34,1,1,C.woodDark);
+  R(170,22,3,1,C.lampStem);R(171,18,1,4,C.lampStem);
+  const c=mix(C.lampOff,C.lampOn,lampI),e=255*lampI;
+  R(169,13,5,1,c,e);R(168,14,7,2,c,e);R(167,16,9,2,c,e);R(167,17,9,1,mix(c,0xe0a040,0.35),e);
+  if(lampI>0)for(let y=9;y<24;y++)for(let x=162;x<182;x++){const dd=Math.hypot(x-171.5,y-15.5);if(dd<8)glows.push([x,y,0xffc060,0.3*lampI*(1-dd/8)]);}
+}
+function drawPicture(){
+  R(183,8,9,8,C.wood);R(184,9,7,6,C.frame);
+  R(186,10,1,1,C.rug);R(188,10,1,1,C.rug);R(185,11,5,1,C.rug);R(186,12,3,1,C.rug);R(187,13,1,1,C.rug);
+}
+function drawDoor(){
+  R(203,6,20,28,C.doorFrame);R(205,8,16,26,C.door);
+  R(207,10,12,9,C.doorPanel);R(207,23,12,9,C.doorPanel);R(206,20,2,2,C.knob);
+  R(211,11,4,1,C.tree);R(210,12,1,4,C.tree);R(215,12,1,4,C.tree);R(211,16,4,1,C.treeDark);   // 花环
+  R(212,16,2,1,0xe0465e);R(212,11,1,1,C.treeLight);
+}
+
+/* ---------- 一帧房间 ---------- */
+function renderRoom(d,t){
+  glows.length=0;
+  const lampI=sm(0.10,0.40,d),g=girlPose(d,t);
+  drawWall();drawFairy(t,d);drawTree(t,d);drawSpeaker(t,d);drawShelf();drawWindow(t,d);
+  drawPicture();drawDoor();drawRug();
+  drawBedBack();
+  if(g.inBed)drawGirl(g);
+  drawBedFront(t,d);drawZzz(t,d);drawLamp(lampI);
+  if(!g.inBed)drawGirl(g);
+
+  // 光照：环境光随 d 连续变化 + 台灯 + 月光/阳光 + 圣诞树彩灯
+  const A=LIGHT,u=d<0.5?d*2:d*2-1,a0=d<0.5?A.ambNight:A.ambMid,a1=d<0.5?A.ambMid:A.ambDay;
+  const aR=a0[0]+(a1[0]-a0[0])*u,aG=a0[1]+(a1[1]-a0[1])*u,aB=a0[2]+(a1[2]-a0[2])*u;
+  const lI=lampI*(1-0.62*d)*0.95,mI=(1-d)*(1-d),sI=sm(0.5,1,d),tI=(1-d)*(0.75+0.25*Math.sin(t*3));
+  const lR=A.lamp[0]*lI,lG=A.lamp[1]*lI,lB=A.lamp[2]*lI;
+  const mR=A.moon[0]*mI+A.sun[0]*sI,mG=A.moon[1]*mI+A.sun[1]*sI,mB=A.moon[2]*mI+A.sun[2]*sI;
+  for(let i=0,o=0;i<N;i++,o+=4){
+    const e=em[i];if(e===255)continue;
+    const l=lampMap[i],m=moonMap[i],tr=treeMap[i]*tI;
+    let r=px[o]*(aR+l*lR+m*mR+tr*0.24),gg=px[o+1]*(aG+l*lG+m*mG+tr*0.13),b=px[o+2]*(aB+l*lB+m*mB+tr*0.2);
+    if(e){const f=e/255;r+=(px[o]-r)*f;gg+=(px[o+1]-gg)*f;b+=(px[o+2]-b)*f;}
+    px[o]=r;px[o+1]=gg;px[o+2]=b;
+  }
+  for(const gl of glows)G(gl[0],gl[1],gl[2],gl[3]);
+  rctx.putImageData(img,0,0);
+}
+
+/* ---------- 玻璃滑块（放大 + 折射 + 色散） ---------- */
+let q=1,L=0,lensImg=null,lensTab=null,lensA=null;
+const lensCv=document.createElement('canvas'),lctx=lensCv.getContext('2d');
+function buildLens(){
+  L=Math.max(40,Math.round(2*KR*Math.min(q,2)));
+  lensCv.width=lensCv.height=L;lensImg=lctx.createImageData(L,L);
+  lensTab=new Float32Array(L*L*6);lensA=new Uint8Array(L*L);
+  const Rl=KR/S,M=1.5;
+  for(let j=0;j<L;j++)for(let i=0;i<L;i++){
+    const nx=(i+0.5)/L*2-1,ny=(j+0.5)/L*2-1,r=Math.hypot(nx,ny),p=j*L+i;
+    if(r>=1)continue;
+    lensA[p]=clamp((1-r)*L/2,0,1)*255;
+    const g=1/M+(1.14-1/M)*Math.pow(r,3.2);        // 中心放大，边缘向外折射
+    for(let k=0;k<3;k++){const gk=g*(1+(k-1)*0.05*(0.25+r*r));   // RGB 折射率略有不同 → 色散
+      lensTab[p*6+k*2]=nx*Rl*gk;lensTab[p*6+k*2+1]=ny*Rl*gk;}
+  }
+}
+function renderLens(cxl,cyl){
+  const o=lensImg.data,T=lensTab,n=L*L,wm=W-1,hm=H-1;
+  for(let p=0,q4=0,q6=0;p<n;p++,q4+=4,q6+=6){
+    const a=lensA[p];if(!a){o[q4+3]=0;continue;}
+    let x=(cxl+T[q6])|0,y=(cyl+T[q6+1])|0;x=x<0?0:x>wm?wm:x;y=y<0?0:y>hm?hm:y;
+    o[q4]=px[(y*W+x)<<2]*1.06+5;
+    x=(cxl+T[q6+2])|0;y=(cyl+T[q6+3])|0;x=x<0?0:x>wm?wm:x;y=y<0?0:y>hm?hm:y;
+    o[q4+1]=px[((y*W+x)<<2)+1]*1.06+5;
+    x=(cxl+T[q6+4])|0;y=(cyl+T[q6+5])|0;x=x<0?0:x>wm?wm:x;y=y<0?0:y>hm?hm:y;
+    o[q4+2]=px[((y*W+x)<<2)+2]*1.06+7;
+    o[q4+3]=a;
+  }
+  lctx.putImageData(lensImg,0,0);
+}
+function circle(r){ctx.beginPath();ctx.arc(0,0,r,0,TAU);}
+function drawKnob(cx,cy,sx,sy){
+  ctx.save();ctx.translate(cx,cy);ctx.scale(sx,sy);
+  ctx.shadowColor='rgba(18,10,48,.55)';ctx.shadowBlur=14*q;ctx.shadowOffsetY=5*q;
+  ctx.fillStyle='rgba(18,10,48,.6)';circle(KR-1.5);ctx.fill();
+  ctx.shadowColor='transparent';ctx.shadowBlur=0;ctx.shadowOffsetY=0;
+  ctx.imageSmoothingEnabled=true;ctx.drawImage(lensCv,-KR,-KR,KR*2,KR*2);
+  let g=ctx.createRadialGradient(0,0,KR*0.6,0,0,KR);
+  g.addColorStop(0,'rgba(255,255,255,0)');g.addColorStop(0.78,'rgba(40,30,90,.10)');g.addColorStop(1,'rgba(18,12,60,.42)');
+  ctx.fillStyle=g;circle(KR);ctx.fill();
+  g=ctx.createLinearGradient(0,-KR,0,KR);
+  g.addColorStop(0,'rgba(255,255,255,.30)');g.addColorStop(0.42,'rgba(255,255,255,0)');g.addColorStop(1,'rgba(255,255,255,.12)');
+  ctx.fillStyle=g;circle(KR);ctx.fill();
+  ctx.save();ctx.rotate(-0.42);                                   // 顶部高光
+  g=ctx.createLinearGradient(0,-KR*0.86,0,-KR*0.42);
+  g.addColorStop(0,'rgba(255,255,255,.85)');g.addColorStop(1,'rgba(255,255,255,.04)');
+  ctx.fillStyle=g;ctx.beginPath();ctx.ellipse(0,-KR*0.64,KR*0.5,KR*0.2,0,0,TAU);ctx.fill();
+  ctx.restore();
+  ctx.fillStyle='rgba(255,255,255,.9)';ctx.beginPath();ctx.ellipse(KR*0.47,-KR*0.52,KR*0.07,KR*0.045,0.7,0,TAU);ctx.fill();
+  ctx.lineCap='round';                                            // 底部焦散
+  g=ctx.createLinearGradient(-KR,0,KR,0);
+  g.addColorStop(0,'rgba(255,255,255,0)');g.addColorStop(0.5,'rgba(255,255,255,.5)');g.addColorStop(1,'rgba(255,255,255,0)');
+  ctx.strokeStyle=g;ctx.lineWidth=3.2;ctx.beginPath();ctx.arc(0,0,KR*0.85,Math.PI*0.2,Math.PI*0.8);ctx.stroke();
+  g=ctx.createLinearGradient(-KR*0.7,-KR,KR*0.7,KR);              // 边缘
+  g.addColorStop(0,'rgba(255,255,255,.98)');g.addColorStop(0.5,'rgba(255,255,255,.28)');g.addColorStop(1,'rgba(255,255,255,.85)');
+  ctx.strokeStyle=g;ctx.lineWidth=2.4;circle(KR-1.4);ctx.stroke();
+  ctx.strokeStyle='rgba(30,20,70,.35)';ctx.lineWidth=1;circle(KR-0.3);ctx.stroke();
+  ctx.restore();
+}
+function capsulePath(o){
+  const r=CH/2+o;ctx.beginPath();
+  ctx.moveTo(CH/2,-o);ctx.lineTo(CW-CH/2,-o);ctx.arc(CW-CH/2,CH/2,r,-Math.PI/2,Math.PI/2);
+  ctx.lineTo(CH/2,CH+o);ctx.arc(CH/2,CH/2,r,Math.PI/2,Math.PI*1.5);ctx.closePath();
+}
+
+/* ---------- 声音 ---------- */
+let AC=null,master=null,noiseBuf=null,lastTick=0;
+function audioInit(){
+  if(AC){if(AC.state==='suspended')AC.resume();return;}
+  try{
+    AC=new (window.AudioContext||window.webkitAudioContext)();
+    master=AC.createGain();master.gain.value=0.55;master.connect(AC.destination);
+    noiseBuf=AC.createBuffer(1,AC.sampleRate*0.2,AC.sampleRate);
+    const dd=noiseBuf.getChannelData(0);for(let i=0;i<dd.length;i++)dd[i]=Math.random()*2-1;
+  }catch(e){AC=null;}
+}
+function noise(t0,dur,freq,qv,type,vol){
+  const s=AC.createBufferSource();s.buffer=noiseBuf;
+  const f=AC.createBiquadFilter();f.type=type;f.frequency.value=freq;f.Q.value=qv;
+  const g=AC.createGain();g.gain.setValueAtTime(vol,t0);g.gain.exponentialRampToValueAtTime(0.0008,t0+dur);
+  s.connect(f);f.connect(g);g.connect(master);s.start(t0,Math.random()*0.1);s.stop(t0+dur+0.02);
+}
+function tone(t0,f0,f1,dur,type,vol){
+  const o=AC.createOscillator();o.type=type;o.frequency.setValueAtTime(f0,t0);
+  if(f1!==f0)o.frequency.exponentialRampToValueAtTime(f1,t0+dur);
+  const g=AC.createGain();g.gain.setValueAtTime(0.0001,t0);g.gain.exponentialRampToValueAtTime(vol,t0+0.008);
+  g.gain.exponentialRampToValueAtTime(0.0008,t0+dur);
+  o.connect(g);g.connect(master);o.start(t0);o.stop(t0+dur+0.02);
+}
+function sndTick(p){
+  if(!AC||AC.state!=='running')return;const t0=AC.currentTime;if(t0-lastTick<0.03)return;lastTick=t0;
+  noise(t0,0.028,1900+p*1500,4,'bandpass',0.22);
+  tone(t0,1000+p*700,800+p*500,0.02,'triangle',0.05);
+}
+function sndSwitch(on){
+  if(!AC||AC.state!=='running')return;const t0=AC.currentTime;
+  noise(t0,0.03,on?3200:1800,1.2,'highpass',0.3);
+  tone(t0,on?170:120,on?70:50,0.1,'sine',0.5);
+  const notes=on?[659,988,1319]:[523,392,262];
+  notes.forEach((f,i)=>tone(t0+0.03+i*0.06,f,f,on?0.55:0.4,on?'triangle':'sine',on?0.12:0.14));
+}
+
+/* ---------- 交互与弹簧 ---------- */
+let pos=0,vel=0,target=0,drag=false,grab=0,over=0,sq=0,sqv=0,ps=1,pv=0,endState='off',lastDet=0;
+function toTrack(e){const r=cv.getBoundingClientRect();return ((e.clientX-r.left)/r.width*CW-X0)/(X1-X0);}
+function setTarget(raw){
+  if(raw<0){over=Math.min(0.16,-raw*0.6);target=0;}
+  else if(raw>1){over=Math.min(0.16,(raw-1)*0.6);target=1;}
+  else{over=0;target=raw;}
+}
+cap.addEventListener('pointerdown',e=>{
+  audioInit();cap.setPointerCapture(e.pointerId);
+  const p=toTrack(e);grab=Math.abs(p-pos)*(X1-X0)<KR*1.05?p-pos:0;
+  drag=true;setTarget(p-grab);e.preventDefault();
+});
+cap.addEventListener('pointermove',e=>{if(drag)setTarget(toTrack(e)-grab);});
+function release(){
+  if(!drag)return;drag=false;over=0;audioInit();
+  let tg=clamp(target+vel*0.07,0,1);
+  if(tg<0.06)tg=0;else if(tg>0.94)tg=1;target=tg;
+}
+cap.addEventListener('pointerup',release);cap.addEventListener('pointercancel',release);
+cap.addEventListener('keydown',e=>{
+  let tg=null;
+  if(e.key==='ArrowRight'||e.key==='ArrowUp')tg=target+0.1;
+  else if(e.key==='ArrowLeft'||e.key==='ArrowDown')tg=target-0.1;
+  else if(e.key==='Home')tg=0;else if(e.key==='End')tg=1;
+  else if(e.key===' '||e.key==='Enter')tg=target<0.5?1:0;
+  if(tg!==null){audioInit();target=clamp(tg,0,1);e.preventDefault();}
+});
+function hit(sp){sqv-=Math.min(sp,5)*1.5;}
+function step(h){
+  const k=drag?1100:190,c=2*Math.sqrt(k)*(drag?0.85:0.4);
+  vel+=(k*(target-pos)-c*vel)*h;pos+=vel*h;
+  if(pos<0){pos=0;if(vel<0){hit(-vel);vel*=-0.42;}}
+  else if(pos>1){pos=1;if(vel>0){hit(vel);vel*=-0.42;}}
+  const sT=Math.min(0.2,Math.abs(vel)*0.055)-over;                // 速度拉伸 / 顶墙压扁
+  sqv+=(520*(sT-sq)-2*Math.sqrt(520)*0.3*sqv)*h;sq=clamp(sq+sqv*h,-0.3,0.3);
+  const pT=drag?0.94:1;pv+=(600*(pT-ps)-2*Math.sqrt(600)*0.33*pv)*h;ps+=pv*h;
+}
+
+/* ---------- 尺寸 ---------- */
+function resize(){
+  const k=Math.min(1,(window.innerWidth-24)/720),dpr=Math.min(window.devicePixelRatio||1,3);
+  wrap.style.width=720*k+'px';wrap.style.height=138*k+'px';cap.style.transform='scale('+k+')';
+  q=Math.max(1,k*dpr);cv.width=Math.round(CW*q);cv.height=Math.round(CH*q);buildLens();
+}
+window.addEventListener('resize',resize);resize();
+
+/* ---------- 主循环 ---------- */
+let last=performance.now(),acc=0,lastAria=-1;
+function frame(now){
+  let dt=Math.min(0.05,(now-last)/1000);last=now;acc+=dt;
+  while(acc>0){step(1/240);acc-=1/240;}
+  const t=now/1000,d=clamp(pos,0,1);
+
+  const det=Math.round(d*28);if(det!==lastDet){lastDet=det;sndTick(d);}
+  if(d>=0.995){if(endState!=='on'){endState='on';sndSwitch(true);}}
+  else if(d<=0.005){if(endState!=='off'){endState='off';sndSwitch(false);}}
+  else if(d>0.04&&d<0.96)endState='mid';
+  const av=Math.round(d*100);if(av!==lastAria){lastAria=av;cap.setAttribute('aria-valuenow',av);}
+
+  renderRoom(d,t);
+  const sx=(1+sq)*ps,sy=(1-sq*0.55)*ps;
+  let cx=X0+(X1-X0)*d;
+  if(sq<0)cx+=KR*sq*(clamp(1-d/0.03,0,1)-clamp(1-(1-d)/0.03,0,1));   // 压扁时贴住端点
+  renderLens(cx/S,CH/2/S);
+
+  ctx.setTransform(q,0,0,q,0,0);
+  ctx.imageSmoothingEnabled=false;
+  ctx.drawImage(roomCv,0,0,CW,CH);
+  ctx.save();capsulePath(0);ctx.clip();                              // 凹槽内阴影
+  ctx.shadowColor='rgba(12,8,40,.6)';ctx.shadowBlur=9*q;ctx.shadowOffsetY=3*q;
+  ctx.lineWidth=6;ctx.strokeStyle='#000';capsulePath(3);ctx.stroke();ctx.restore();
+  drawKnob(cx,CH/2,sx,sy);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
